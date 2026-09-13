@@ -1,12 +1,12 @@
 [project]
 name = "ComfyUI_Antonioilev"
 description = "Antonioilev Light Pack - practical ComfyUI nodes for 3D workflows, mesh repair, UV processing, PBR previews and texture tools."
-version = "1.0.8"
+version = "1.0.1"
 license = { file = "LICENSE.txt" }
 dependencies = []
 
 [project.urls]
-Repository = "https://github.com/Antonioilev/ComfyUI_Antonioilev_Lightpack"
+Repository = "https://github.com/Antonioilev/ComfyUI_Antonioilev"
 
 [tool.comfy]
 PublisherId = "antonioilev"
