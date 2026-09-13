@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GeomPack 3D Viewer</title>
+
+<style>
+body, html {
+    margin:0;
+    padding:0;
+    width:100%;
+    height:100%;
+    overflow:hidden;
+    background:#1a1a1a;
+    font-family:monospace;
+}
+
+#c {
+    width:100%;
+    height:100%;
+    display:block;
+    touch-action:none;
+}
+</style>
+</head>
+
+<body>
+
+<img id="view-overlay" style="position:absolute; top:0; left:0; width:100%; height:100%; object-fit:cover; pointer-events:none; z-index:10; display:none;" />
+
+<canvas id="c"></canvas>
+<canvas id="mask-canvas" style="position:absolute; top:0; left:0; pointer-events:none; z-index:20;"></canvas>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+
+const canvas = document.getElementById('c');
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a1a);
+
+// =====================================================
+// CAMERA
+// =====================================================
+// Стало:
+const frustumSize = 5; 
+const aspect = innerWidth / innerHeight;
+const camera = new THREE.OrthographicCamera(
+    (frustumSize * aspect) / -2, (frustumSize * aspect) / 2, 
+    frustumSize / 2, frustumSize / -2, 
+    0.1, 1000
+);
+camera.position.set(2,2,2);
+
+const renderer = new THREE.WebGLRenderer({
+    canvas,
+    antialias: true,
+    alpha: false,
+    preserveDrawingBuffer: true 
+});
+
+renderer.toneMapping = THREE.NoToneMapping;
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(1.0);
+
+
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.enableZoom = false;
+
+// Обработчик зума с клавишей CTRL (для орто-камеры)
+canvas.addEventListener('wheel', (e) => {
+    if (e.ctrlKey) {
+        e.preventDefault();
+        
+        // Если зажат еще и Shift, уменьшаем шаг в 5 раз для ультраточного зума
+        const zoomSpeed = e.shiftKey ? 0.0001 : 0.001; 
+        
+        // Изменяем параметр zoom
+        camera.zoom -= e.deltaY * zoomSpeed;
+        
+        // Ограничиваем зум, чтобы не улететь в бесконечность
+        camera.zoom = Math.max(0.1, Math.min(camera.zoom, 20));
+        
+        // Обновляем матрицу проекции
+        camera.updateProjectionMatrix();
+    }
+}, { passive: false });
+
+const grid = new THREE.GridHelper(10, 10, 0x444444, 0x222222);
+grid.name = 'myGrid'; // Даем имя для поиска
+scene.add(grid);
+
+scene.add(new THREE.AmbientLight(0xffffff,1.5));
+
+const dirLight = new THREE.DirectionalLight(0xffffff,1);
+dirLight.position.set(5,5,5);
+scene.add(dirLight);
+
+let mesh = null;
+
+// =====================================================
+// BASE64 helper
+// =====================================================
+function getBase64FromImageUrl(url) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.setAttribute('crossOrigin', 'anonymous');
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            resolve(canvas.toDataURL('image/png'));
+        };
+        img.onerror = reject;
+        img.src = url;
+    });
+}
+
+function drawOverlayMask(a_rad, a_feather) {
+    const canvas = document.getElementById('mask-canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (a_rad <= 0) return;
+
+    const centerX = canvas.width / 2;
+    const centerY = canvas.height / 2;
+    const minDim = Math.min(canvas.width, canvas.height);
+    const radius = (minDim * 0.85 * a_rad) / 2;
+
+    // 1. Рисуем КРАСНЫЙ контур круга (для визуализации области)
+    ctx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 2. Отрисовка прицела (4 красных отрезка)
+    // Длина отрезка = a_feather
+    ctx.lineWidth = 2;
+    const dashLength = a_feather;
+    const directions = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+
+    directions.forEach(dir => {
+        ctx.beginPath();
+        // Отрезки начинаются от границы круга (radius) и идут внутрь (radius - dashLength)
+        ctx.moveTo(centerX + dir[0] * (radius - dashLength), centerY + dir[1] * (radius - dashLength));
+        ctx.lineTo(centerX + dir[0] * radius, centerY + dir[1] * radius);
+        ctx.stroke();
+    });
+}
+
+
+
+// =====================================================
+// 🔥 FIX: SEND POSE MATRIX (NOT VIEW)
+// =====================================================
+function getCameraDataForPython() {
+    controls.update();
+    camera.updateMatrixWorld(true);
+    camera.updateProjectionMatrix();
+    renderer.render(scene, camera);
+
+    const poseMatrix = camera.matrixWorld.clone();
+
+	// Логируем зум и границы для отладки
+    console.log("--- [CAMERA SNAPSHOT] ---");
+    console.log("Zoom:", camera.zoom);
+    console.log("Ortho Size (Height):", camera.top - camera.bottom);
+    console.log("Effective Ortho Size:", (camera.top - camera.bottom) / camera.zoom);
+
+    return {
+        matrix: poseMatrix.toArray(),
+        target: controls.target.toArray(), // ДОБАВИТЬ ЭТУ СТРОКУ
+        fov: camera.fov,
+        aspect: camera.aspect,
+        near: camera.near,
+        far: camera.far,
+        width: window.innerWidth,
+        height: window.innerHeight,
+		top: camera.top,
+        bottom: camera.bottom,
+        left: camera.left,
+        right: camera.right,
+        zoom: camera.zoom, // Три.js хранит множитель здесь
+    };
+}
+
+// =====================================================
+// LOAD MESH
+// =====================================================
+function loadMesh(url) {
+    if (mesh) scene.remove(mesh);
+
+    // Теперь мы всегда грузим через GLTFLoader, так как ComfyUI отдает GLB/GLTF
+    const loader = new GLTFLoader(); 
+
+    loader.load(url, (gltf) => {
+        mesh = gltf.scene;
+        scene.add(mesh);
+		
+		// --- ВЫДЕЛЕННЫЙ БЛОК ДЛЯ ЗАМЕНЫ ---
+        mesh.traverse((child) => {
+            if (child.isMesh) {
+                // Заменяем материал на Basic, чтобы он не реагировал на свет
+                // и выдавал 100% яркость текстуры
+                const oldMap = child.material.map;
+                child.material = new THREE.MeshBasicMaterial({
+                    map: oldMap,
+                    side: THREE.DoubleSide
+                });
+                child.material.needsUpdate = true;
+            }
+        });
+        // ----------------------------------
+		
+        const box = new THREE.Box3().setFromObject(mesh);
+        const size = new THREE.Vector3();
+        box.getSize(size);
+
+        const scale = 2 / Math.max(size.x, size.y, size.z);
+        mesh.scale.setScalar(scale);
+
+        const center = box.getCenter(new THREE.Vector3());
+        mesh.position.sub(center.multiplyScalar(scale));
+    }, undefined, (err) => {
+        console.error("[Iframe] Error loading GLB:", err);
+    });
+}
+
+// =====================================================
+// MESSAGE BUS
+// =====================================================
+window.addEventListener('message', async (e) => {
+
+	// === ВСТАВИТЬ ЭТОТ БЛОК В НАЧАЛО МЕССЕДЖ-ХЕНДЛЕРА ===
+    if (e.data.type === 'TOGGLE_GRID') {
+        const grid = scene.getObjectByName('myGrid');
+        if (grid) {
+            grid.visible = e.data.visible;
+            // Дополнительная гарантия:
+            if (!e.data.visible) {
+                scene.remove(grid);
+            } else if (!grid.parent) {
+                scene.add(grid);
+            }
+            renderer.render(scene, camera);
+        }
+    }
+	
+	// --- ДОБАВИТЬ ЭТОТ БЛОК В HTML ---
+    if (e.data.type === 'UPDATE_MESH') {
+        const url = `/view?filename=${encodeURIComponent(e.data.filename)}&type=output`;
+        
+        const loader = new GLTFLoader();
+        loader.load(url, (gltf) => {
+            const newMesh = gltf.scene;
+            if (mesh) {
+                // Обновляем содержимое существующего контейнера, не удаляя сам контейнер
+                while(mesh.children.length > 0) {
+                    mesh.remove(mesh.children[0]);
+                }
+                newMesh.children.forEach(child => {
+                    if (child.isMesh) {
+                        const oldMap = child.material.map;
+                        child.material = new THREE.MeshBasicMaterial({
+                            map: oldMap,
+                            side: THREE.DoubleSide
+                        });
+                        child.material.needsUpdate = true;
+                    }
+                    mesh.add(child);
+                });
+            } else {
+                mesh = newMesh;
+                scene.add(mesh);
+            }
+            renderer.render(scene, camera);
+        });
+        return; // Прерываем, чтобы не пошли другие проверки
+    }
+    // ----------------------------------
+	
+    // ===================================================
+
+	// --- ДОБАВИТЬ ЭТОТ БЛОК ---
+    if (e.data.type === 'SET_CAMERA_SNAPSHOT') {
+        const { camera_matrix, camera_target, zoom, ortho_size } = e.data;
+
+        if (camera_matrix) {
+            // 1. ВКЛЮЧАЕМ АВТООБНОВЛЕНИЕ МАТРИЦЫ
+            camera.matrixAutoUpdate = true; 
+            
+            // 2. Устанавливаем матрицу
+            camera.matrix.fromArray(camera_matrix);
+            camera.matrixWorldNeedsUpdate = true;
+            
+            // 3. Декомпозируем матрицу, чтобы OrbitControls "понял" куда встать
+            camera.matrix.decompose(camera.position, camera.quaternion, camera.scale);
+        }
+
+        if (camera_target) {
+            controls.target.fromArray(camera_target);
+            controls.update(); // Обязательно апдейт
+        }
+
+        if (zoom !== undefined) {
+            camera.zoom = zoom;
+            camera.updateProjectionMatrix();
+        }
+
+        if (a_rad !== undefined && a_feather !== undefined) {
+            drawOverlayMask(a_rad, a_feather);
+        }
+		
+		// 4. ГАРАНТИРОВАННО ВКЛЮЧАЕМ УПРАВЛЕНИЕ
+        controls.enabled = true; 
+        controls.update();
+        
+        console.log("[Viewport] Camera synchronized and controls enabled");
+    }
+    // ---------------------------
+
+	// Внутри window.addEventListener('message', ...)
+	if (e.data.type === 'APPLY_TEXTURE') {
+		const loader = new THREE.TextureLoader();
+		loader.load(e.data.url, (texture) => {
+			// Установка параметров текстуры для корректного отображения
+			texture.flipY = false; 
+			
+			if (mesh) {
+				mesh.traverse((child) => {
+					if (child.isMesh) {
+						// Создаем новый материал, если его нет, или обновляем текущий
+						child.material.map = texture;
+						child.material.needsUpdate = true;
+					}
+				});
+			}
+		});
+	}
+
+	if (e.data.type === 'DRAW_MASK') {
+		drawOverlayMask(e.data.a_rad, e.data.a_feather);
+	}
+
+    if (e.data.type === 'LOAD_MESH') {
+        const overlayImg = document.getElementById('view-overlay');
+        overlayImg.style.display = 'none';
+        overlayImg.src = '';
+
+        // Формируем URL внутри iframe
+        const url = `/view?filename=${encodeURIComponent(e.data.filename)}&type=output&t=${e.data.timestamp}`;
+        
+        // Вызываем функцию загрузки
+        loadMesh(url);
+    }
+
+    if (e.data.type === 'UPDATE_OVERLAY') {
+        const overlayImg = document.getElementById('view-overlay');
+        overlayImg.src = e.data.url;
+        overlayImg.style.display = 'block';
+        overlayImg.style.opacity = '0.5';
+    }
+
+    if (e.data.type === 'GET_CAMERA_SNAPSHOT') {
+        const camData = getCameraDataForPython();
+        window.parent.postMessage({
+            type: "CAMERA_SNAPSHOT",
+            camera_matrix: camData.matrix,
+            camera_target: camData.target, // Добавили передачу таргета
+			zoom: camera.zoom,                    // <--- ПЕРЕДАЕМ ЗУМ
+			orthoSize: (camera.top - camera.bottom) / camera.zoom // <--- ПЕРЕДАЕМ РАЗМЕР
+        }, "*");
+    }
+
+    if (e.data.type === 'REQUEST_BAKE') {
+        console.log("[HTML] BAKE START - Force Cleaning...");
+
+        // 1. УДАЛЕНИЕ 3D СЕТКИ
+        scene.traverse((obj) => {
+            if (obj.type === 'GridHelper' || obj.name === 'myGrid') {
+                obj.visible = false;
+                scene.remove(obj);
+            }
+        });
+
+        // 2. ОЧИСТКА 2D МАСКИ (!!!)
+        const maskCanvas = document.getElementById('mask-canvas');
+        if (maskCanvas) {
+            const ctx = maskCanvas.getContext('2d');
+            ctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+        }
+
+        // 3. ПРИНУДИТЕЛЬНАЯ ПЕРЕРИСОВКА
+        renderer.render(scene, camera); 
+        await new Promise(r => setTimeout(r, 100)); // Ждем немного дольше
+        
+        // 4. ПОЛУЧЕНИЕ ДАННЫХ (один раз)
+        const camData = getCameraDataForPython();
+        const seed = e.data.seed || performance.now();
+
+        // ... далее ваш код (window.parent.postMessage)
+
+        console.log("CAM POSE:", camData.matrix);
+
+        let inputImageBase64 = "";
+
+        try {
+            const overlayImg = document.getElementById('view-overlay');
+
+            if (overlayImg && overlayImg.src && !overlayImg.src.startsWith('data:')) {
+                inputImageBase64 = await getBase64FromImageUrl(overlayImg.src);
+            } else if (overlayImg && overlayImg.src) {
+                inputImageBase64 = overlayImg.src;
+            } else {
+                inputImageBase64 = canvas.toDataURL('image/png');
+            }
+        } catch (err) {
+            inputImageBase64 = canvas.toDataURL('image/png');
+        }
+
+        window.parent.postMessage({
+            type: 'BAKE_RESULT',
+            image: inputImageBase64,
+
+            // 🔥 FIXED CONTRACT: POSE matrix
+            camera_matrix: camData.matrix,
+			camera_target: camData.target,
+
+			// ДОБАВЬ ЭТИ ДВЕ СТРОКИ:
+			zoom: camera.zoom,
+			orthoSize: (camera.top - camera.bottom) / camera.zoom,
+
+            fov: camData.fov,
+            aspect: camData.aspect,
+            viewport_width: camData.width,
+            viewport_height: camData.height,
+            seed: seed
+        }, "*");
+    }
+});
+
+// =====================================================
+function animate(){
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+}
+animate();
+
+// Стало:
+addEventListener('resize', () => {
+    const aspect = innerWidth / innerHeight;
+    const viewSize = frustumSize / camera.zoom; // Учитываем текущий зум!
+    
+    camera.left = (viewSize * aspect) / -2;
+    camera.right = (viewSize * aspect) / 2;
+    camera.top = viewSize / 2;
+    camera.bottom = viewSize / -2;
+    
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+
+</body>
+</html>

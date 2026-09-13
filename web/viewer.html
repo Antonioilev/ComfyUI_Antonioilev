@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>GeomPack 3D Viewer</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #1a1a1a;
+            font-family: monospace;
+        }
+        #canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #888;
+            font-size: 14px;
+            text-align: center;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <!-- ИНТЕРФЕЙС УПРАВЛЕНИЯ ПОВЕРХ ВЕБГЛ ДЛЯ ВСЕХ БРАУЗЕРОВ -->
+    <div style="position: fixed; top: 6px; left: 6px; z-index: 999999; display: flex; flex-direction: column; gap: 4px; background: rgba(20, 20, 20, 0.85); padding: 6px 8px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); font-family: sans-serif; box-shadow: 0 2px 8px rgba(0,0,0,0.7); backdrop-filter: blur(4px);">
+        <label style="display: flex; align-items: center; gap: 6px; color: #ffffff; font-size: 11px; font-weight: bold; cursor: pointer; user-select: none;">
+            <input type="checkbox" id="ui_cb_textured" checked style="margin: 0; cursor: pointer; accent-color: #52339b;">
+            Textured
+        </label>
+        <label style="display: flex; align-items: center; gap: 6px; color: #ffffff; font-size: 11px; font-weight: bold; cursor: pointer; user-select: none;">
+            <input type="checkbox" id="ui_cb_wireframe" style="margin: 0; cursor: pointer; accent-color: #52339b;">
+            Wireframe
+        </label>
+    </div>
+
+    <button id="ui_btn_update" style="position: fixed; top: 6px; right: 6px; z-index: 999999; height: 24px; padding: 2px 8px; background: rgba(42, 26, 79, 0.85); border: 1px solid #52339b; border-radius: 4px; color: #ffffff; cursor: pointer; font-size: 11px; font-weight: bold; font-family: sans-serif; box-shadow: 0 2px 4px rgba(0,0,0,0.5); transition: background 0.2s;">
+        🔄 Update Layout
+    </button>
+
+    <canvas id="canvas"></canvas>
+    <div id="loading">READY TO LOAD MESH</div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+
+        console.log('[GeomPack Viewer] Initializing...');
+
+        const canvas = document.getElementById('canvas');
+        const loading = document.getElementById('loading');
+
+        // Глобальные состояния флагов отображения для синхронизации при загрузке новых моделей
+        let isTextureVisible = true;
+        let isWireframeVisible = false;
+
+        // --- SCENE SETUP ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x1a1a1a);
+
+        // --- CAMERA ---
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 1000);
+        camera.position.set(2, 2, 2);
+
+		// --- RENDERER & ADAPTIVE RESIZE (ФИКС ЗУМА ДЛЯ EDGE) ---
+        const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+        
+        // Функция жесткого обновления размеров сцены по фактическому родителю canvas
+        function resizeViewer() {
+            const width = window.innerWidth || canvas.clientWidth || 300;
+            const height = window.innerHeight || canvas.clientHeight || 430;
+            
+            camera.aspect = width / height;
+            camera.updateProjectionMatrix();
+            
+            renderer.setSize(width, height, false); // false запрещает перезаписывать inline inline-styles
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Ограничиваем для производительности
+        }
+
+        renderer.outputColorSpace = THREE.SRGBColorSpace; 
+        renderer.toneMapping = THREE.LinearToneMapping;
+        renderer.toneMappingExposure = 1.2; 
+
+        // Первичный расчет размеров
+        resizeViewer();
+
+        // Слушаем стандартный ресайз окна
+        window.addEventListener('resize', resizeViewer);
+
+        // Фикс для Chromium/Edge: перехватываем наше форсированное событие ресайза из ComfyUI-ноды
+        window.addEventListener('message', (event) => {
+            if (event.data && event.data.type === "FORCE_UPDATE_RESIZE") {
+                resizeViewer();
+                if (controls) controls.update();
+            }
+        });
+
+		// --- CONTROLS ---
+        const controls = new OrbitControls(camera, canvas);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        
+        // 1. ОТКЛЮЧАЕМ СТАНДАРТНЫЙ ЗУМ, чтобы OrbitControls не хватал колесо автоматически
+        controls.enableZoom = false; 
+
+        // 2. ВРУЧНУЮ УПРАВЛЯЕМ ЗУМОМ ТОЛЬКО ПРИ ЗАЖАТОМ CTRL
+        canvas.addEventListener('wheel', (e) => {
+            if (e.ctrlKey) {
+                e.preventDefault(); // Защита от нативного зума браузера
+                
+                // Рассчитываем направление скролла
+                const zoomFactor = e.deltaY < 0 ? 0.95 : 1.05;
+                
+                // Масштабируем позицию камеры относительно таргета (центра сцены)
+                camera.position.sub(controls.target);
+                camera.position.multiplyScalar(zoomFactor);
+                camera.position.add(controls.target);
+                
+                controls.update();
+            }
+        }, { passive: false });
+
+        // --- LIGHTING ---
+        const ambientLight = new THREE.AmbientLight(0xffffff, 1.0); 
+        scene.add(ambientLight);
+
+        const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.0);
+        scene.add(hemiLight);
+
+        const sunLight = new THREE.DirectionalLight(0xffffff, 1.2);
+        sunLight.position.set(5, 10, 7);
+        scene.add(sunLight);
+
+        // --- HELPERS ---
+        const grid = new THREE.GridHelper(10, 10, 0x333333, 0x222222);
+        scene.add(grid);
+
+        let currentMesh = null;
+
+        // --- CORE FUNCTIONS ---
+
+        function clearCurrentMesh() {
+            if (currentMesh) {
+                currentMesh.traverse((node) => {
+                    if (node.isMesh) {
+                        // Принудительно очищаем кастомную топологическую сетку перед удалением геометрии
+                        const oldWire = node.getObjectByName("customWireframeMesh");
+                        if (oldWire) {
+                            oldWire.geometry.dispose();
+                            oldWire.material.dispose();
+                            node.remove(oldWire);
+                        }
+
+                        node.geometry.dispose();
+                        if (Array.isArray(node.material)) {
+                            node.material.forEach(m => {
+                                if (m.map) m.map.dispose();
+                                if (m.userData && m.userData.originalMap) m.userData.originalMap.dispose();
+                                m.dispose();
+                            });
+                        } else {
+                            if (node.material.map) node.material.map.dispose();
+                            if (node.material.userData && node.material.userData.originalMap) node.material.userData.originalMap.dispose();
+                            node.material.dispose();
+                        }
+                    }
+                });
+                scene.remove(currentMesh);
+                currentMesh = null;
+            }
+        }
+
+        // Вспомогательная функция для обновления состояния текстур на основе текущего флага
+        function applyTextureVisibility() {
+            if (!currentMesh) return;
+            currentMesh.traverse((child) => {
+                if (child.isMesh && child.material) {
+                    const materials = Array.isArray(child.material) ? child.material : [child.material];
+                    materials.forEach(mat => {
+                        if (!isTextureVisible) {
+                            // Кэшируем исходную текстуру, чтобы не потерять её ссылки
+                            if (!mat.userData.originalMap && mat.map) {
+                                mat.userData.originalMap = mat.map;
+                            }
+                            mat.map = null;
+                        } else {
+                            if (mat.userData.originalMap) {
+                                mat.map = mat.userData.originalMap;
+                            }
+                        }
+                        mat.needsUpdate = true;
+                    });
+                }
+            });
+        }
+
+        // Вспомогательная функция для генерации/удаления Wireframe поверх модели
+        function applyWireframeVisibility() {
+            if (!currentMesh) return;
+            currentMesh.traverse((child) => {
+                if (child.isMesh) {
+                    const oldWire = child.getObjectByName("customWireframeMesh");
+                    if (oldWire) {
+                        oldWire.geometry.dispose();
+                        oldWire.material.dispose();
+                        child.remove(oldWire);
+                    }
+
+                    if (isWireframeVisible) {
+                        const wireGeom = new THREE.WireframeGeometry(child.geometry);
+                        const wireMat = new THREE.LineBasicMaterial({
+                            color: 0x00ff00, // Контрастный неоново-зеленый цвет сетки
+                            linewidth: 1,
+                            depthTest: true
+                        });
+                        const wireLines = new THREE.LineSegments(wireGeom, wireMat);
+                        wireLines.name = "customWireframeMesh";
+                        child.add(wireLines);
+                    }
+                }
+            });
+        }
+
+        function loadMesh(filepath, options = {}) {
+            loading.textContent = 'LOADING...';
+            loading.style.display = 'block';
+
+            // ИНЪЕКЦИЯ ЯРКОСТИ: Если из ноды пришло значение brightness, применяем его
+            if (options.brightness !== undefined) {
+                renderer.toneMappingExposure = parseFloat(options.brightness);
+            }
+
+            clearCurrentMesh();
+
+            const isGLB = filepath.includes('.glb') || filepath.includes('.gltf');
+            const loader = isGLB ? new GLTFLoader() : new OBJLoader();
+
+            loader.load(
+                filepath,
+                (result) => {
+                    const object = isGLB ? result.scene : result;
+                    currentMesh = object;
+
+                    object.traverse((child) => {
+                        if (child.isMesh) {
+                            child.geometry.computeVertexNormals();
+
+                            if (child.material) {
+                                const materials = Array.isArray(child.material) ? child.material : [child.material];
+                                materials.forEach(mat => {
+                                    mat.side = THREE.DoubleSide;
+                                    mat.flatShading = false;
+                                    
+                                    // Убираем черноту, если нет PBR-карт (металл/рафнес)
+                                    if (mat.isMeshStandardMaterial) {
+                                        mat.metalness = 0.0; // Гарантируем, что не "чернит" из-за металла
+                                        mat.roughness = 0.8; // Делаем поверхность матовой для лучшей видимости BaseColor
+                                    }
+
+                                    if (mat.color && mat.color.r === 0 && mat.color.g === 0 && mat.color.b === 0) {
+                                        mat.color.setHex(0xeeeeee);
+                                    }
+                                    
+                                    mat.needsUpdate = true;
+                                });
+                            }
+                        }
+                    });
+
+                    // Автоматически применяем текущее состояние текстур и сетки к только что загруженному мешу
+                    applyTextureVisibility();
+                    applyWireframeVisibility();
+
+                    const box = new THREE.Box3().setFromObject(object);
+                    const center = box.getCenter(new THREE.Vector3());
+                    const size = box.getSize(new THREE.Vector3());
+                    
+                    object.position.sub(center); 
+                    scene.add(object);
+
+                    const maxDim = Math.max(size.x, size.y, size.z);
+                    const distance = maxDim * 2.2;
+                    camera.position.set(distance, distance, distance);
+                    camera.lookAt(0, 0, 0);
+                    controls.target.set(0, 0, 0);
+                    controls.update();
+
+                    loading.style.display = 'none';
+                },
+                (progress) => {
+                    if (progress.lengthComputable) {
+                        const percent = Math.round((progress.loaded / progress.total) * 100);
+                        loading.textContent = `LOADING: ${percent}%`;
+                    }
+                },
+                (error) => {
+                    console.error('[GeomPack Viewer] Error:', error);
+                    loading.textContent = 'ERROR LOADING MESH';
+                }
+            );
+        }
+
+        // --- RENDER LOOP ---
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+		// --- ОБРАБОТКА СОБЫТИЙ ИЗ COMFYUI ---
+        window.addEventListener('message', (event) => {
+            const data = event.data;
+            if (!data) return;
+
+            if (data.type === 'LOAD_MESH' || data.type === 'LOAD_MESH_UV') {
+                loadMesh(data.filepath, data.options);
+            } else if (data.type === 'CLEAR_SCENE') {
+                clearCurrentMesh();
+                loading.textContent = 'READY';
+                loading.style.display = 'block';
+            } else if (data.type === 'SET_TEXTURE_VISIBLE') {
+                isTextureVisible = data.visible;
+                // Синхронизируем состояние чекбокса на случай внешнего вызова
+                document.getElementById("ui_cb_textured").checked = data.visible;
+                applyTextureVisibility();
+            } else if (data.type === 'SET_WIREFRAME_VISIBLE') {
+                isWireframeVisible = data.visible;
+                // Синхронизируем состояние чекбокса на случай внешнего вызова
+                document.getElementById("ui_cb_wireframe").checked = data.visible;
+                applyWireframeVisibility();
+            } else if (data.type === 'FORCE_UPDATE_RESIZE') {
+                const width = document.documentElement.clientWidth || window.innerWidth;
+                const height = document.documentElement.clientHeight || window.innerHeight;
+                
+                camera.aspect = width / height;
+                camera.updateProjectionMatrix();
+                
+                renderer.setSize(width, height);
+                
+                controls.update();
+                renderer.render(scene, camera);
+            }
+        });
+
+        // --- ЛОКАЛЬНАЯ АКТИВАЦИЯ ИНТЕРФЕЙСА (ДЛЯ FIREFOX И КРОССБРАУЗЕРНОСТИ) ---
+        document.addEventListener("DOMContentLoaded", () => {
+            const cbTextured = document.getElementById("ui_cb_textured");
+            const cbWireframe = document.getElementById("ui_cb_wireframe");
+            const btnUpdate = document.getElementById("ui_btn_update");
+
+            // Защита: блокируем прокидывание кликов на холст OrbitControls при работе с UI
+            const stopEvents = (e) => { e.stopPropagation(); };
+            cbTextured.parentElement.parentElement.addEventListener("pointerdown", stopEvents);
+            cbTextured.parentElement.parentElement.addEventListener("click", stopEvents);
+            btnUpdate.addEventListener("pointerdown", stopEvents);
+
+            // Обработка чекбокса текстуры
+            cbTextured.addEventListener("change", () => {
+                isTextureVisible = cbTextured.checked;
+                applyTextureVisibility();
+            });
+
+            // Обработка чекбокса сетки
+            cbWireframe.addEventListener("change", () => {
+                isWireframeVisible = cbWireframe.checked;
+                applyWireframeVisibility();
+            });
+
+            // Эффект наведения на кнопку
+            btnUpdate.addEventListener("mouseenter", () => btnUpdate.style.background = "rgba(82, 51, 155, 0.95)");
+            btnUpdate.addEventListener("mouseleave", () => btnUpdate.style.background = "rgba(42, 26, 79, 0.85)");
+
+            // Обработка кнопки Update Layout
+            btnUpdate.addEventListener("click", (e) => {
+                e.preventDefault();
+                // Отправляем сигнал наверх, родительской ноде ComfyUI, чтобы она выполнила пересчет контейнера
+                window.parent.postMessage({ type: "FORCE_UPDATE_RESIZE" }, "*");
+            });
+        });
+
+        console.log('[GeomPack Viewer] Ready.');
+    </script>
+</body>
+</html>
