@@ -190,6 +190,3 @@ Building practical tools for:
 
 More Antonioilev tools and larger node packs are coming.
 
-⭐ If Antonioilev Light Pack is useful to you, consider starring the repository.
-
-It helps the project grow and makes it easier for other ComfyUI users to discover it.
