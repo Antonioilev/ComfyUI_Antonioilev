@@ -487,7 +487,8 @@
 				});
                 applyTextureVisibility();
                 applyWireframeVisibility();
-                object.position.sub(new THREE.Box3().setFromObject(object).getCenter(new THREE.Vector3()));
+                // Центрирование !!!
+				// object.position.sub(new THREE.Box3().setFromObject(object).getCenter(new THREE.Vector3())); 
                 scene.add(object);
 				
 				applyEnvIntensityToMesh();

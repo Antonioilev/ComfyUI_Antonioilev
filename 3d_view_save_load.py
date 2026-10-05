@@ -40,7 +40,7 @@ class Ultimate3DViewSaveLoad:
                 "full_path": ("STRING", {"default": "/mnt/l/Game_2/Art/"}),
                 "mode": (["Auto (Load if empty)", "Save Only", "Load Only", "Preview Only"],),
                 "fallback_input_type": (["Trimesh", "Mesh", "Coords (Sparse)", "Shape Slat"], {"default": "Trimesh"}),
-                "brightness": ("FLOAT", {"default": 1.2, "min": 0.1, "max": 5.0, "step": 0.1}),
+                "brightness": ("FLOAT", {"default": 1.2, "min": 0.1, "max": 50.0, "step": 0.1}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "show_preview": ("BOOLEAN", {"default": True}),
             },

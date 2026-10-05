@@ -680,29 +680,46 @@ app.registerExtension({
                         }
 
                                                 // --- ENV URL из ответа ноды (Python должен отдать env_file / env_url) ---
-                        let envUrl = "";
-						const envFromMsg = message?.env_url?.[0] || message?.env_url
-                            || message?.env_file?.[0] || message?.env_file
-                            || message?.env_hdr_file?.[0] || message?.env_hdr_file
-                            || message?.hdr_url?.[0] || message?.hdr_url
-                            || "";
-                        if (envFromMsg) {
-                            const envNorm = String(envFromMsg).replace(/\\/g, "/");
-                            const envMatch = envNorm.match(/(?:^|\/)(output|input|temp)\/(.+)$/);
-                            if (envMatch) {
-                                const [, envType, envRel] = envMatch;
-                                const envParts = envRel.split("/");
-                                const envFname = envParts.pop();
-                                const envSub = envParts.join("/");
-                                envUrl = `/view?filename=${encodeURIComponent(envFname)}&type=${envType}&subfolder=${encodeURIComponent(envSub)}&t=${Date.now()}`;
-                            } else if (envNorm.startsWith("/view?")) {
-                                envUrl = envNorm;
-                            } else {
-                                // просто имя файла в output
-                                envUrl = `/view?filename=${encodeURIComponent(envNorm)}&type=output&subfolder=&t=${Date.now()}`;
-                            }
-                        } else {
-							envUrl = ""; // явно: нет env
+						// --- ENV URL: пустая строка / пустой массив = нет env ---
+						let envUrl = "";
+						const candidates = [
+							message?.env_url?.[0],
+							message?.env_url,
+							message?.env_file?.[0],
+							message?.env_file,
+							message?.env_hdr_file?.[0],
+							message?.env_hdr_file,
+							message?.hdr_url?.[0],
+							message?.hdr_url
+						];
+
+						let raw = "";
+						for (const c of candidates) {
+							if (c == null) continue;
+							// если пришёл массив — берём первый элемент
+							const v = Array.isArray(c) ? c[0] : c;
+							if (typeof v === "string" && v.trim() !== "") {
+								raw = v.trim();
+								break;
+							}
+						}
+
+						if (raw) {
+							const envNorm = raw.replace(/\\/g, "/");
+							const envMatch = envNorm.match(/(?:^|\/)(output|input|temp)\/(.+)$/);
+							if (envMatch) {
+								const [, envType, envRel] = envMatch;
+								const envParts = envRel.split("/");
+								const envFname = envParts.pop();
+								const envSub = envParts.join("/");
+								envUrl = `/view?filename=${encodeURIComponent(envFname)}&type=${envType}&subfolder=${encodeURIComponent(envSub)}&t=${Date.now()}`;
+							} else if (envNorm.startsWith("/view?")) {
+								envUrl = envNorm;
+							} else {
+								envUrl = `/view?filename=${encodeURIComponent(envNorm)}&type=output&subfolder=&t=${Date.now()}`;
+							}
+						} else {
+							envUrl = ""; // нет env → default lights
 						}
 						
 
